@@ -16,8 +16,8 @@ This is an official implementation of our work published in ICRA'25. [Project Pa
 Please follow the instructions below to install the repo and dependencies.
 
 ```bash
-git clone 
-cd 
+git clone https://github.com/lsg-slam/LSG-SLAM.git
+cd LSG-SLAM
 ```
 
 
