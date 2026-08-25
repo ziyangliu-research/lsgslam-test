@@ -213,16 +213,20 @@ def main():
         stage("PnP prior 0 -> 1")
         gt_w2c0 = torch.linalg.inv(pose0)
         gt_w2c1 = torch.linalg.inv(pose1)
+        # The real SLAM loop stores the same growing gt_w2c_all_frames list in
+        # both curr_data and the previous frame's last_data. Reproduce that
+        # aliasing here so estimate_pnp's [-2]/[-1] indexing matches production.
+        gt_history = [gt_w2c0, gt_w2c1]
         last_data = {
             "depth_original": depth_orig,
             "depth": depth,
             "intrinsics": intrinsics,
             "est_w2c": gt_w2c0,
-            "iter_gt_w2c_list": [gt_w2c0],
+            "iter_gt_w2c_list": gt_history,
             "id": 0,
         }
         curr_data = {
-            "iter_gt_w2c_list": [gt_w2c0, gt_w2c1],
+            "iter_gt_w2c_list": gt_history,
             "id": 1,
         }
         pnp_result = estimate_pnp(mkpts1, mkpts0, curr_data, last_data, dataset)
