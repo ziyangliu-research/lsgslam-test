@@ -149,7 +149,6 @@ class BasicEncoder(nn.Module):
         self.layer2 = self._make_layer(96, stride=1 + (downsample > 1))
         self.layer3 = self._make_layer(128, stride=1 + (downsample > 0))
 
-        # output convolution
         self.conv2 = nn.Conv2d(128, output_dim, kernel_size=1)
 
         self.dropout = None
@@ -175,8 +174,6 @@ class BasicEncoder(nn.Module):
 
 
     def forward(self, x, dual_inp=False):
-
-        # if input is list, combine batch dimension
         is_list = isinstance(x, tuple) or isinstance(x, list)
         if is_list:
             batch_dim = x[0].shape[0]
@@ -203,18 +200,12 @@ class MultiBasicEncoder(nn.Module):
         self.norm_fn = norm_fn
         self.downsample = downsample
 
-        # self.norm_111 = nn.BatchNorm2d(128, affine=False, track_running_stats=False)
-        # self.norm_222 = nn.BatchNorm2d(128, affine=False, track_running_stats=False)
-
         if self.norm_fn == 'group':
             self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64)
-
         elif self.norm_fn == 'batch':
             self.norm1 = nn.BatchNorm2d(64)
-
         elif self.norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(64)
-
         elif self.norm_fn == 'none':
             self.norm1 = nn.Sequential()
 
@@ -229,13 +220,11 @@ class MultiBasicEncoder(nn.Module):
         self.layer5 = self._make_layer(128, stride=2)
 
         output_list = []
-        
         for dim in output_dim:
             conv_out = nn.Sequential(
                 ResidualBlock(128, 128, self.norm_fn, stride=1),
                 nn.Conv2d(128, dim[2], 3, padding=1))
             output_list.append(conv_out)
-
         self.outputs04 = nn.ModuleList(output_list)
 
         output_list = []
@@ -244,14 +233,12 @@ class MultiBasicEncoder(nn.Module):
                 ResidualBlock(128, 128, self.norm_fn, stride=1),
                 nn.Conv2d(128, dim[1], 3, padding=1))
             output_list.append(conv_out)
-
         self.outputs08 = nn.ModuleList(output_list)
 
         output_list = []
         for dim in output_dim:
             conv_out = nn.Conv2d(128, dim[0], 3, padding=1)
             output_list.append(conv_out)
-
         self.outputs16 = nn.ModuleList(output_list)
 
         if dropout > 0:
@@ -277,7 +264,6 @@ class MultiBasicEncoder(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x, dual_inp=False, num_layers=3):
-
         x = self.conv1(x)
         x = self.norm1(x)
         x = self.relu1(x)
@@ -294,7 +280,6 @@ class MultiBasicEncoder(nn.Module):
 
         y = self.layer4(x)
         outputs08 = [f(y) for f in self.outputs08]
-
         if num_layers == 2:
             return (outputs04, outputs08, v) if dual_inp else (outputs04, outputs08)
 
@@ -327,13 +312,16 @@ class SubModule(nn.Module):
 class Feature(SubModule):
     def __init__(self):
         super(Feature, self).__init__()
-        pretrained =  True
+        pretrained = True
         model = timm.create_model('mobilenetv2_100', pretrained=pretrained, features_only=True)
-        layers = [1,2,3,5,6]
+        layers = [1, 2, 3, 5, 6]
         chans = [16, 24, 32, 96, 160]
         self.conv_stem = model.conv_stem
         self.bn1 = model.bn1
-        self.act1 = model.act1
+        # timm 0.5.x exposed a separate stem activation as model.act1.
+        # Modern timm folds the activation into bn1 via a norm+activation layer.
+        # Use Identity in that case to preserve the same single-activation behavior.
+        self.act1 = model.act1 if hasattr(model, 'act1') else nn.Identity()
 
         self.block0 = torch.nn.Sequential(*model.blocks[0:layers[0]])
         self.block1 = torch.nn.Sequential(*model.blocks[layers[0]:layers[1]])
@@ -359,4 +347,3 @@ class Feature(SubModule):
         x4 = self.deconv8_4(x8, x4)
         x4 = self.conv4(x4)
         return [x4, x8, x16, x32]
-
