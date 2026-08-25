@@ -15,5 +15,6 @@ export TARTANAIR_SEQUENCE="$SEQUENCE"
 export TARTANAIR_START="$START"
 export TARTANAIR_END="$END"
 export TARTANAIR_STRIDE="$STRIDE"
+export PYTHONFAULTHANDLER=1
 
-python scripts/tartanair_splatam.py configs/tartanair/lsgslam.py
+python -u scripts/tartanair_splatam.py configs/tartanair/lsgslam.py
