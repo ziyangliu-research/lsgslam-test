@@ -25,6 +25,7 @@ python tools/tartanair_parser/operate_tartanair_data.py \
 for seq in "${SEQS[@]}"; do
     export TARTANAIR_SEQUENCE="$seq"
     out="${WORK_ROOT}/${seq}_full_split5"
+    summary="$out/benchmark_summary_split.json"
 
     echo
     echo "============================================================"
@@ -32,6 +33,12 @@ for seq in "${SEQS[@]}"; do
     echo "Test frames: 4,9,14,... (pose only; no mapping/keyframe)"
     echo "============================================================"
 
+    if [ -f "$summary" ]; then
+        echo "SKIP: ${seq} already completed: $summary"
+        continue
+    fi
+
+    # Remove only an incomplete previous attempt. Completed runs are preserved.
     rm -rf "$out"
     mkdir -p "$out"
 
@@ -44,11 +51,12 @@ for seq in "${SEQS[@]}"; do
 
     if [ "$status" -ne 0 ]; then
         echo "FAILED: ${seq} (exit=${status})"
+        echo "Re-run the same command after fixing the issue; completed sequences will be skipped."
         exit "$status"
     fi
 
     echo "FINISHED: ${seq}"
-    cat "$out/benchmark_summary_split.json"
+    cat "$summary"
 done
 
 echo
