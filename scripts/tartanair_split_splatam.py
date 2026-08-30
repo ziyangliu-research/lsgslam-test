@@ -48,8 +48,13 @@ def _load_split_splatam():
 
     source = _replace_once(
         source,
-        "        iter_time_idx = time_idx\n",
-        """        iter_time_idx = time_idx
+        """        # Optimize only current time step for tracking
+        iter_time_idx = time_idx
+
+        # if time_idx == num_frames - 1:
+""",
+        """        # Optimize only current time step for tracking
+        iter_time_idx = time_idx
 
         # TartanAir benchmark split: every fifth GLOBAL frame is held out from
         # mapping, but remains in the sequential pose-tracking stream.
@@ -62,6 +67,8 @@ def _load_split_splatam():
             absolute_frame_idx = int(dataset_config.get("start", 0)) + time_idx * int(dataset_config.get("stride", 1))
         is_test_frame = split_every > 0 and (absolute_frame_idx % split_every == split_offset)
         print(f"[Split] frame={absolute_frame_idx} role={'TEST-pose-only' if is_test_frame else 'TRAIN-map'}")
+
+        # if time_idx == num_frames - 1:
 """,
         "frame-role flag",
     )
