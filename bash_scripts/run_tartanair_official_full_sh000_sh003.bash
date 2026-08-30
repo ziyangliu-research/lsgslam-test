@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 SEQS=(SH000 SH001 SH002 SH003)
 DATA_ROOT="${TARTANAIR_DATA_ROOT:-/home/shiyo/Desktop/Datasets/TartanAir_Stereo_Challenge}"
-FULL_ROOT="${LSG_FULL_ROOT:-experiments/tartanair_official_full}"
+FULL_ROOT="${LSG_FULL_ROOT:-experiments/tartanair_official_full_split}"
 CHUNK_SIZE="${LSG_FULL_CHUNK_SIZE:-200}"
 
 export TARTANAIR_DATA_ROOT="$DATA_ROOT"
@@ -41,10 +41,11 @@ for seq in "${SEQS[@]}"; do
 
     echo
     echo "================================================================"
-    echo "$seq official-style full LSG-SLAM"
+    echo "$seq official-style FULL LSG-SLAM + strict 8:2 holdout"
     echo "Frames: $num_frames (0..$last_idx)"
+    echo "Test frames: 4,9,14,... = pose-only; no map/SR loss"
     echo "Caches: images=$image_count depth=$depth_count features=$feat_count"
-    echo "Chunk size: $CHUNK_SIZE raw frames, 1-frame boundary overlap"
+    echo "Chunk size: $CHUNK_SIZE raw frames"
     echo "================================================================"
 
     if [ "$depth_count" -ne "$image_count" ] || [ "$feat_count" -ne "$image_count" ]; then
@@ -57,9 +58,9 @@ for seq in "${SEQS[@]}"; do
     export LSG_WORKDIR="$seq_root"
 
     # ------------------------------------------------------------------
-    # Stage 1: released-style odometry / Gaussian submaps.
-    # Official EuRoC runner uses 200-frame chunks and repeats the boundary
-    # frame between adjacent chunks. Keep the same organization here.
+    # Stage 1: official-style 200-frame Gaussian submaps, while preserving
+    # the common 8:2 evaluation protocol. Test frames are tracked but skipped
+    # by Gaussian insertion, mapping optimization and mapping keyframe pool.
     # ------------------------------------------------------------------
     start=0
     while [ "$start" -lt "$last_idx" ]; do
@@ -76,13 +77,14 @@ for seq in "${SEQS[@]}"; do
         out="$seq_root/$run_name"
 
         if [ -f "$out/params.npz" ]; then
-            echo "[Stage 1] SKIP completed submap: $run_name"
+            echo "[Stage 1] SKIP completed split submap: $run_name"
         else
-            echo "[Stage 1] Submap $run_name"
+            echo "[Stage 1] Split submap $run_name"
             rm -rf "$out"
             mkdir -p "$out"
             set +e
-            python -u scripts/tartanair_splatam.py configs/tartanair/lsgslam.py \
+            python -u scripts/tartanair_split_splatam.py \
+                configs/tartanair/lsgslam_full_split_8_2.py \
                 2>&1 | tee "$out/run.log"
             status=${PIPESTATUS[0]}
             set -e
@@ -96,7 +98,9 @@ for seq in "${SEQS[@]}"; do
     done
 
     # ------------------------------------------------------------------
-    # Stage 2: released loop-closure stage over the complete sequence.
+    # Stage 2: released loop-closure logic on the full sequence.
+    # Test frames MAY participate here because loop closure is pose estimation;
+    # loop-pair temporary Gaussians are not inserted into the final map.
     # ------------------------------------------------------------------
     export TARTANAIR_START=0
     export TARTANAIR_END="$last_idx"
@@ -106,9 +110,10 @@ for seq in "${SEQS[@]}"; do
     if [ -f "$loop_marker" ]; then
         echo "[Stage 2] SKIP completed loop-closure stage"
     else
-        echo "[Stage 2] Full-sequence loop detection + loop constraints"
+        echo "[Stage 2] Full-sequence loop detection + pose constraints"
         set +e
-        python -u scripts/tartanair_loop_closure.py configs/tartanair/lsgslam.py \
+        python -u scripts/tartanair_loop_closure.py \
+            configs/tartanair/lsgslam_full_split_8_2.py \
             2>&1 | tee "$seq_root/loop_closure.log"
         status=${PIPESTATUS[0]}
         set -e
@@ -120,15 +125,16 @@ for seq in "${SEQS[@]}"; do
     fi
 
     # ------------------------------------------------------------------
-    # Stage 3: released pose-graph optimization + 5000-iter structure refine.
-    # No FPS is reported for this offline/post-processing stage.
+    # Stage 3: released pose graph + Gaussian deformation + 5000-iter SR.
+    # The adapter changes only SR frame sampling: test frames are excluded from
+    # the appearance/map loss. Final rendering evaluates train/test separately.
     # ------------------------------------------------------------------
     export LSG_FULL_BASE_FOLDER="$seq_root"
     backend_marker="$seq_root/.full_backend_complete"
-    if [ -f "$backend_marker" ]; then
-        echo "[Stage 3] SKIP completed pose-graph + structure-refine backend"
+    if [ -f "$backend_marker" ] && [ -f "$seq_root/benchmark_summary_full_split.json" ]; then
+        echo "[Stage 3] SKIP completed split-aware full backend"
     else
-        echo "[Stage 3] Pose graph optimization + structure refinement"
+        echo "[Stage 3] Pose graph optimization + train-only structure refinement"
         set +e
         python -u tools/loop_closure/tartanair_pose_graph_part_optim.py \
             2>&1 | tee "$seq_root/full_backend.log"
@@ -143,17 +149,21 @@ for seq in "${SEQS[@]}"; do
 
     echo
     echo "==================== $seq COMPLETE ===================="
-    metrics="$seq_root/RenderingResult/avg_metrics.txt"
-    if [ -f "$metrics" ]; then
-        cat "$metrics"
+    summary="$seq_root/benchmark_summary_full_split.json"
+    if [ -f "$summary" ]; then
+        cat "$summary"
     else
-        echo "Backend completed but avg_metrics.txt was not found. Check:"
+        echo "Backend completed but split summary was not found. Check:"
         echo "  $seq_root/full_backend.log"
+        exit 1
     fi
-    echo "Pose graph diagnostics: $seq_root/PoseGraphResult/"
     echo "========================================================"
 done
 
 echo
-echo "All SH000-SH003 official-style full LSG-SLAM runs completed."
+echo "All SH000-SH003 full LSG-SLAM 8:2 runs completed."
 echo "Results root: $FULL_ROOT"
+
+python tools/summarize_tartanair_full_split_benchmarks.py \
+    SH000 SH001 SH002 SH003 \
+    --root "$FULL_ROOT"
