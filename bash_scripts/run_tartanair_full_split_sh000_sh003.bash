@@ -14,13 +14,30 @@ export TARTANAIR_START=0
 export TARTANAIR_END=-1
 export TARTANAIR_STRIDE=1
 
-echo "============================================================"
-echo "Precomputing full TartanAir sequences (existing files skipped)"
-echo "Sequences: ${SEQS[*]}"
-echo "============================================================"
+missing_preprocess=()
+for seq in "${SEQS[@]}"; do
+    seq_dir="$DATA_ROOT/stereo/$seq"
+    image_count=$(find "$seq_dir/image_left" -maxdepth 1 -type f -name '*_left.png' | wc -l)
+    depth_count=$(find "$seq_dir/depth_sceneflow" -maxdepth 1 -type f -name '*.npy' 2>/dev/null | wc -l)
+    feature_count=$(find "$seq_dir/global_features" -maxdepth 1 -type f -name '*.npy' 2>/dev/null | wc -l)
 
-python tools/tartanair_parser/operate_tartanair_data.py \
-  --sequences "${SEQS[@]}"
+    echo "[Preprocess check] $seq images=$image_count depth=$depth_count features=$feature_count"
+    if [ "$image_count" -eq 0 ] || [ "$depth_count" -ne "$image_count" ] || [ "$feature_count" -ne "$image_count" ]; then
+        missing_preprocess+=("$seq")
+    fi
+done
+
+if [ "${#missing_preprocess[@]}" -gt 0 ]; then
+    echo "============================================================"
+    echo "Precomputing missing full TartanAir sequences"
+    echo "Sequences: ${missing_preprocess[*]}"
+    echo "============================================================"
+
+    python tools/tartanair_parser/operate_tartanair_data.py \
+      --sequences "${missing_preprocess[@]}"
+else
+    echo "All four sequences already have complete depth/global-feature caches; skipping preprocessing."
+fi
 
 for seq in "${SEQS[@]}"; do
     export TARTANAIR_SEQUENCE="$seq"
