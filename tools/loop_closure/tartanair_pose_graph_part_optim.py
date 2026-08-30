@@ -1,13 +1,11 @@
 """TartanAir adapter for the released LSG-SLAM pose-graph + structure-refine backend.
 
-This wrapper intentionally keeps tools/loop_closure/pose_graph_part_optim.py
-unchanged. It applies only dataset/path routing patches at runtime:
-  * TartanAir dataset adapter;
-  * environment-driven base folder and sequence;
-  * TartanAir RGB/depth loading during structure refinement.
-
-The pose-graph, Gaussian deformation, and 5000-iteration structure-refinement
-logic are the original released implementation.
+The released tools/loop_closure/pose_graph_part_optim.py stays unchanged on disk.
+This wrapper applies only TartanAir routing and the experiment protocol at
+runtime.  For the 8:2 benchmark, test frames (global ids 4,9,14,...) may take
+part in pose estimation / loop closure, but they are excluded from the 5000-
+iteration structure-refinement loss.  Final rendering is evaluated on every
+frame and reported separately for train/test.
 """
 
 import os
@@ -34,7 +32,14 @@ def main():
     with open(source_path, "r", encoding="utf-8") as f:
         source = f.read()
 
-    # Import the TartanAir adapter without changing the original backend file.
+    source = _replace_once(
+        source,
+        "import numpy as np\n",
+        "import numpy as np\nimport json\n",
+        "json import",
+    )
+
+    # Import the TartanAir adapter without changing the released backend file.
     source = _replace_once(
         source,
         "from pytorch_msssim import ms_ssim\n",
@@ -84,7 +89,7 @@ def main():
         '''    base_folder = os.environ["LSG_FULL_BASE_FOLDER"]
     scene_name = os.environ["TARTANAIR_SEQUENCE"]
     dataset_type = 'tartanair'
-    from configs.tartanair.lsgslam import config
+    from configs.tartanair.lsgslam_full_split_8_2 import config
     dataset_config = config["data"]
     dataset_config['basedir'] = os.path.join(
         os.environ.get(
@@ -148,6 +153,181 @@ def main():
             )
 ''',
         "structure-refine image loading",
+    )
+
+    # Keep official aggregate metrics, but additionally collect strict holdout
+    # train/test metrics using ordinary single-scale SSIM for the paper table.
+    source = _replace_once(
+        source,
+        '''    before_opt_psnr_list = []
+    before_opt_ssim_list = []
+    before_opt_lpips_list = []
+
+    after_opt_psnr_list = []
+    after_opt_ssim_list = []
+    after_opt_lpips_list = []
+''',
+        '''    before_opt_psnr_list = []
+    before_opt_ssim_list = []
+    before_opt_lpips_list = []
+
+    after_opt_psnr_list = []
+    after_opt_ssim_list = []
+    after_opt_lpips_list = []
+
+    before_train_psnr, before_train_ssim = [], []
+    before_test_psnr, before_test_ssim = [], []
+    after_train_psnr, after_train_ssim = [], []
+    after_test_psnr, after_test_ssim = [], []
+    total_gaussians = 0
+''',
+        "split metric accumulators",
+    )
+
+    # Before-SR evaluation: evaluation may use all frames; only optimization is
+    # held out.  Record train/test separately without changing official metrics.
+    source = _replace_once(
+        source,
+        '''                before_opt_psnr_list.append(psnr.cpu().numpy())
+                before_opt_ssim_list.append(ssim.cpu().numpy())
+                before_opt_lpips_list.append(lpips_score)
+''',
+        '''                before_opt_psnr_list.append(psnr.cpu().numpy())
+                before_opt_ssim_list.append(ssim.cpu().numpy())
+                before_opt_lpips_list.append(lpips_score)
+                ssim_single = calc_ssim(weighted_im, weighted_gt_im).mean()
+                global_frame_idx = start_idx + i * stride
+                if global_frame_idx % 5 == 4:
+                    before_test_psnr.append(float(psnr.detach().cpu()))
+                    before_test_ssim.append(float(ssim_single.detach().cpu()))
+                else:
+                    before_train_psnr.append(float(psnr.detach().cpu()))
+                    before_train_ssim.append(float(ssim_single.detach().cpu()))
+''',
+        "before-SR split metrics",
+    )
+
+    # Critical holdout rule: SR is appearance/map optimization, so its 5000
+    # iterations must sample TRAIN frames only.  Test frames remain available
+    # for camera pose / loop closure and for final evaluation.
+    source = _replace_once(
+        source,
+        '''        for i in tqdm(range(structure_refine_total_iters), 'Color refining...'):
+
+            index = random.randint(0, optim_c2ws.shape[0]-1)
+''',
+        '''        train_local_indices = [
+            idx for idx in range(optim_c2ws.shape[0])
+            if ((start_idx + idx * stride) % 5) != 4
+        ]
+        if len(train_local_indices) == 0:
+            raise RuntimeError(f"No training frames available for SR part {start_idx}..{end_idx}")
+        print(f"[Split-SR] train={len(train_local_indices)}/{optim_c2ws.shape[0]} frames")
+        for i in tqdm(range(structure_refine_total_iters), 'Color refining...'):
+
+            index = random.choice(train_local_indices)
+''',
+        "train-only structure refinement",
+    )
+
+    source = _replace_once(
+        source,
+        '''                after_opt_psnr_list.append(psnr.cpu().numpy())
+                after_opt_ssim_list.append(ssim.cpu().numpy())
+                after_opt_lpips_list.append(lpips_score)
+''',
+        '''                after_opt_psnr_list.append(psnr.cpu().numpy())
+                after_opt_ssim_list.append(ssim.cpu().numpy())
+                after_opt_lpips_list.append(lpips_score)
+                ssim_single = calc_ssim(weighted_im, weighted_gt_im).mean()
+                global_frame_idx = start_idx + i * stride
+                if global_frame_idx % 5 == 4:
+                    after_test_psnr.append(float(psnr.detach().cpu()))
+                    after_test_ssim.append(float(ssim_single.detach().cpu()))
+                else:
+                    after_train_psnr.append(float(psnr.detach().cpu()))
+                    after_train_ssim.append(float(ssim_single.detach().cpu()))
+''',
+        "after-SR split metrics",
+    )
+
+    source = _replace_once(
+        source,
+        '''        save_params(params, rendering_save_dir)
+        print(pixel_gs_depth_gamma*pixel_gs_scene_radius)
+''',
+        '''        total_gaussians += int(params['means3D'].shape[0])
+        save_params(params, rendering_save_dir)
+        print(pixel_gs_depth_gamma*pixel_gs_scene_radius)
+''',
+        "Gaussian count accumulation",
+    )
+
+    # Add one machine-readable strict split summary.  ATE is a true camera-center
+    # RMSE after rigid SE(3) alignment (no scale alignment).
+    source = _replace_once(
+        source,
+        '''    with open(os.path.join(rendering_save_dir, 'avg_metrics.txt'), 'w', encoding='utf-8') as file:
+''',
+        '''    gt_xyz = gt_traj_pts.T.astype(np.float64)
+    est_xyz = loop_traj_pts.T.astype(np.float64)
+    valid_pose = np.isfinite(gt_xyz).all(axis=1) & np.isfinite(est_xyz).all(axis=1)
+    gt_valid = gt_xyz[valid_pose]
+    est_valid = est_xyz[valid_pose]
+    if len(gt_valid) >= 3:
+        gt_mean = gt_valid.mean(axis=0)
+        est_mean = est_valid.mean(axis=0)
+        X = est_valid - est_mean
+        Y = gt_valid - gt_mean
+        U, _, Vt = np.linalg.svd(X.T @ Y)
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = Vt.T @ U.T
+        t = gt_mean - R @ est_mean
+        est_aligned = (R @ est_valid.T).T + t
+        ate_rmse = float(np.sqrt(np.mean(np.sum((est_aligned - gt_valid) ** 2, axis=1))))
+    else:
+        ate_rmse = float('nan')
+
+    def _mean_or_nan(values):
+        return float(np.mean(values)) if len(values) else float('nan')
+
+    split_summary = {
+        'sequence': scene_name,
+        'maxmap_ratio': float(valid_pose.sum() / len(valid_pose)),
+        'tracked_frames': int(valid_pose.sum()),
+        'num_frames': int(len(valid_pose)),
+        'ate_rmse_se3_m': ate_rmse,
+        'before_sr_train_psnr': _mean_or_nan(before_train_psnr),
+        'before_sr_train_ssim': _mean_or_nan(before_train_ssim),
+        'before_sr_test_psnr': _mean_or_nan(before_test_psnr),
+        'before_sr_test_ssim': _mean_or_nan(before_test_ssim),
+        'after_sr_train_psnr': _mean_or_nan(after_train_psnr),
+        'after_sr_train_ssim': _mean_or_nan(after_train_ssim),
+        'after_sr_test_psnr': _mean_or_nan(after_test_psnr),
+        'after_sr_test_ssim': _mean_or_nan(after_test_ssim),
+        'gaussians': int(total_gaussians),
+        'ssim_type': 'single-scale SSIM',
+        'split_rule': 'global frames 4,9,14,... are pose-only; excluded from mapping and SR loss',
+        'fps': None,
+    }
+    split_summary_path = os.path.join(base_folder, 'benchmark_summary_full_split.json')
+    with open(split_summary_path, 'w', encoding='utf-8') as split_file:
+        json.dump(split_summary, split_file, indent=2)
+    print('\n================ Full LSG-SLAM 8:2 Summary ================')
+    print(f"Sequence:             {scene_name}")
+    print(f"MaxMap:               {100.0 * split_summary['maxmap_ratio']:.2f}%")
+    print(f"ATE RMSE (SE3):       {ate_rmse:.6f} m")
+    print(f"Train PSNR/SSIM:      {split_summary['after_sr_train_psnr']:.4f} / {split_summary['after_sr_train_ssim']:.6f}")
+    print(f"Test PSNR/SSIM:       {split_summary['after_sr_test_psnr']:.4f} / {split_summary['after_sr_test_ssim']:.6f}")
+    print(f"Gaussians:            {total_gaussians}")
+    print(f"Summary:              {split_summary_path}")
+    print('===========================================================\n')
+
+    with open(os.path.join(rendering_save_dir, 'avg_metrics.txt'), 'w', encoding='utf-8') as file:
+''',
+        "full split summary",
     )
 
     module = types.ModuleType("lsg_tartanair_pose_graph_part_optim")
