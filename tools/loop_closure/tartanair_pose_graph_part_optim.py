@@ -39,7 +39,6 @@ def main():
         "json import",
     )
 
-    # Import the TartanAir adapter without changing the released backend file.
     source = _replace_once(
         source,
         "from pytorch_msssim import ms_ssim\n",
@@ -155,8 +154,6 @@ def main():
         "structure-refine image loading",
     )
 
-    # Keep official aggregate metrics, but additionally collect strict holdout
-    # train/test metrics using ordinary single-scale SSIM for the paper table.
     source = _replace_once(
         source,
         '''    before_opt_psnr_list = []
@@ -184,8 +181,6 @@ def main():
         "split metric accumulators",
     )
 
-    # Before-SR evaluation: evaluation may use all frames; only optimization is
-    # held out.  Record train/test separately without changing official metrics.
     source = _replace_once(
         source,
         '''                before_opt_psnr_list.append(psnr.cpu().numpy())
@@ -207,9 +202,6 @@ def main():
         "before-SR split metrics",
     )
 
-    # Critical holdout rule: SR is appearance/map optimization, so its 5000
-    # iterations must sample TRAIN frames only.  Test frames remain available
-    # for camera pose / loop closure and for final evaluation.
     source = _replace_once(
         source,
         '''        for i in tqdm(range(structure_refine_total_iters), 'Color refining...'):
@@ -263,8 +255,6 @@ def main():
         "Gaussian count accumulation",
     )
 
-    # Add one machine-readable strict split summary.  ATE is a true camera-center
-    # RMSE after rigid SE(3) alignment (no scale alignment).
     source = _replace_once(
         source,
         '''    with open(os.path.join(rendering_save_dir, 'avg_metrics.txt'), 'w', encoding='utf-8') as file:
@@ -315,7 +305,8 @@ def main():
     split_summary_path = os.path.join(base_folder, 'benchmark_summary_full_split.json')
     with open(split_summary_path, 'w', encoding='utf-8') as split_file:
         json.dump(split_summary, split_file, indent=2)
-    print('\n================ Full LSG-SLAM 8:2 Summary ================')
+    print()
+    print('================ Full LSG-SLAM 8:2 Summary ================')
     print(f"Sequence:             {scene_name}")
     print(f"MaxMap:               {100.0 * split_summary['maxmap_ratio']:.2f}%")
     print(f"ATE RMSE (SE3):       {ate_rmse:.6f} m")
@@ -323,7 +314,8 @@ def main():
     print(f"Test PSNR/SSIM:       {split_summary['after_sr_test_psnr']:.4f} / {split_summary['after_sr_test_ssim']:.6f}")
     print(f"Gaussians:            {total_gaussians}")
     print(f"Summary:              {split_summary_path}")
-    print('===========================================================\n')
+    print('===========================================================')
+    print()
 
     with open(os.path.join(rendering_save_dir, 'avg_metrics.txt'), 'w', encoding='utf-8') as file:
 ''',
