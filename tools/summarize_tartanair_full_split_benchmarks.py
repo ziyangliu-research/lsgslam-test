@@ -20,52 +20,51 @@ def main():
         nargs="*",
         default=["SH000", "SH001", "SH002", "SH003"],
     )
-    parser.add_argument(
-        "--root", default="experiments/tartanair_official_full_split"
-    )
+    parser.add_argument("--root", default="experiments/tartanair_official_full_split")
     args = parser.parse_args()
 
     for seq in args.sequences:
-        p = os.path.join(args.root, seq, "benchmark_summary_full_split.json")
+        p = os.path.join(args.root, seq, "benchmark_summary_unified.json")
+        if not os.path.isfile(p):
+            raise FileNotFoundError(
+                f"Unified summary not found: {p}\n"
+                "Run: PYTHONPATH=. python tools/evaluate_tartanair_full_unified.py"
+            )
         with open(p, "r", encoding="utf-8") as f:
             x = json.load(f)
+
+        a = x["without_pgo_sr"]
+        b = x["with_pgo_sr"]
 
         print()
         print(seq)
         print(
-            f"{'Method':<22} {'MaxMap':>9} {'ATE RMSE↓':>12} "
+            f"{'Method':<26} {'MaxMap':>9} {'ATE RMSE↓':>12} "
             f"{'Train PSNR/SSIM':>21} {'Test PSNR/SSIM':>21} "
-            f"{'FPS':>8} {'Gaussians':>12}"
+            f"{'FPS':>9} {'Gaussians':>12}"
         )
-        print("-" * 110)
-
-        common = (
-            f"{100*x['maxmap_ratio']:>8.2f}% "
-            f"{x['ate_rmse_se3_m']:>10.4f} m "
-        )
-
-        # The released/paper pipeline performs loop closure + global pose graph
-        # optimization before structure refinement. Therefore both rows share
-        # the same post-PGO ATE; only rendering/map refinement differs.
+        print("-" * 116)
         print(
-            f"{'LSG-SLAM (w/o SR)':<22} "
-            f"{common}"
-            f"{x['before_sr_train_psnr']:>8.2f}/{x['before_sr_train_ssim']:<10.4f} "
-            f"{x['before_sr_test_psnr']:>8.2f}/{x['before_sr_test_ssim']:<10.4f} "
-            f"{'*':>8} {fmt_g(x['gaussians']):>12}"
+            f"{a['label']:<26} "
+            f"{100*a['maxmap_ratio']:>8.2f}% "
+            f"{a['ate_rmse_se3_m']:>10.4f} m "
+            f"{a['train_psnr']:>8.2f}/{a['train_ssim']:<10.4f} "
+            f"{a['test_psnr']:>8.2f}/{a['test_ssim']:<10.4f} "
+            f"{a['fps']:>9.4f} {fmt_g(a['gaussians']):>12}"
         )
         print(
-            f"{'LSG-SLAM (+ SR)':<22} "
-            f"{common}"
-            f"{x['after_sr_train_psnr']:>8.2f}/{x['after_sr_train_ssim']:<10.4f} "
-            f"{x['after_sr_test_psnr']:>8.2f}/{x['after_sr_test_ssim']:<10.4f} "
-            f"{'—':>8} {fmt_g(x['gaussians']):>12}"
+            f"{b['label']:<26} "
+            f"{100*b['maxmap_ratio']:>8.2f}% "
+            f"{b['ate_rmse_se3_m']:>10.4f} m "
+            f"{b['train_psnr']:>8.2f}/{b['train_ssim']:<10.4f} "
+            f"{b['test_psnr']:>8.2f}/{b['test_ssim']:<10.4f} "
+            f"{'—':>9} {fmt_g(b['gaussians']):>12}"
         )
 
     print()
-    print("FPS: '+ SR' is intentionally not reported because SR is fixed-iteration final refinement.")
-    print("The '*' on 'w/o SR' means FPS should be taken from the separately timed online/pre-SR run;")
-    print("do not derive it from the full staged backend run unless loop-closure/PGO timing is explicitly included.")
+    print("Metric protocol: full RGB, no silhouette/depth mask, single-scale SSIM.")
+    print("FPS protocol: unique sequence frames / summed Stage-1 online time; boundary-overlap work is charged in time.")
+    print("PGO/SR is staged final processing, so FPS is intentionally not reported for the +PGO/SR row.")
 
 
 if __name__ == "__main__":
