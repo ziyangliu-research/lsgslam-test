@@ -6,8 +6,6 @@ import os
 
 def fmt_g(n):
     n = int(n)
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.2f}M"
     if n >= 1_000:
         return f"{n / 1_000:.1f}k"
     return str(n)
