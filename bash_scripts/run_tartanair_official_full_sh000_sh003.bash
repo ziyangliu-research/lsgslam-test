@@ -57,11 +57,7 @@ for seq in "${SEQS[@]}"; do
     mkdir -p "$seq_root"
     export LSG_WORKDIR="$seq_root"
 
-    # ------------------------------------------------------------------
-    # Stage 1: official-style 200-frame Gaussian submaps, while preserving
-    # the common 8:2 evaluation protocol. Test frames are tracked but skipped
-    # by Gaussian insertion, mapping optimization and mapping keyframe pool.
-    # ------------------------------------------------------------------
+    # Stage 1: released 200-frame Gaussian submaps with the common 8:2 holdout.
     start=0
     while [ "$start" -lt "$last_idx" ]; do
         end=$((start + CHUNK_SIZE))
@@ -97,11 +93,7 @@ for seq in "${SEQS[@]}"; do
         start="$end"
     done
 
-    # ------------------------------------------------------------------
     # Stage 2: released loop-closure logic on the full sequence.
-    # Test frames MAY participate here because loop closure is pose estimation;
-    # loop-pair temporary Gaussians are not inserted into the final map.
-    # ------------------------------------------------------------------
     export TARTANAIR_START=0
     export TARTANAIR_END="$last_idx"
     export TARTANAIR_STRIDE=1
@@ -124,11 +116,7 @@ for seq in "${SEQS[@]}"; do
         touch "$loop_marker"
     fi
 
-    # ------------------------------------------------------------------
-    # Stage 3: released pose graph + Gaussian deformation + 5000-iter SR.
-    # The adapter changes only SR frame sampling: test frames are excluded from
-    # the appearance/map loss. Final rendering evaluates train/test separately.
-    # ------------------------------------------------------------------
+    # Stage 3: released pose graph + Gaussian deformation + train-only 5000-iter SR.
     export LSG_FULL_BASE_FOLDER="$seq_root"
     backend_marker="$seq_root/.full_backend_complete"
     if [ -f "$backend_marker" ] && [ -f "$seq_root/benchmark_summary_full_split.json" ]; then
@@ -164,6 +152,15 @@ echo
 echo "All SH000-SH003 full LSG-SLAM 8:2 runs completed."
 echo "Results root: $FULL_ROOT"
 
-python tools/summarize_tartanair_full_split_benchmarks.py \
+echo
+echo "[Final Evaluation] Unified raw-RGB PSNR/SSIM + Stage-1 FPS aggregation"
+PYTHONPATH="$ROOT_DIR" python tools/evaluate_tartanair_full_unified.py \
+    SH000 SH001 SH002 SH003 \
+    --root "$FULL_ROOT" \
+    --data-root "$DATA_ROOT"
+
+echo
+echo "[Final Table]"
+PYTHONPATH="$ROOT_DIR" python tools/summarize_tartanair_full_split_benchmarks.py \
     SH000 SH001 SH002 SH003 \
     --root "$FULL_ROOT"
