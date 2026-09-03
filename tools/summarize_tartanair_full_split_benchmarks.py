@@ -4,21 +4,17 @@ import json
 import os
 
 
-def fmt_g(n):
-    n = int(n)
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}k"
-    return str(n)
+DEFAULT_SEQS = ["SE000", "SE001", "SE002", "SE003", "SH000", "SH001", "SH002", "SH003"]
+
+
+def fmt_gk(n):
+    return f"{int(n) / 1000.0:.1f}k"
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "sequences",
-        nargs="*",
-        default=["SH000", "SH001", "SH002", "SH003"],
-    )
-    parser.add_argument("--root", default="experiments/tartanair_official_full_split")
+    parser.add_argument("sequences", nargs="*", default=DEFAULT_SEQS)
+    parser.add_argument("--root", default="experiments/tartanair_official_full_final8")
     args = parser.parse_args()
 
     for seq in args.sequences:
@@ -26,7 +22,7 @@ def main():
         if not os.path.isfile(p):
             raise FileNotFoundError(
                 f"Unified summary not found: {p}\n"
-                "Run: PYTHONPATH=. python tools/evaluate_tartanair_full_unified.py"
+                "Run tools/evaluate_tartanair_full_unified.py first."
             )
         with open(p, "r", encoding="utf-8") as f:
             x = json.load(f)
@@ -37,32 +33,42 @@ def main():
         print()
         print(seq)
         print(
-            f"{'Method':<26} {'MaxMap':>9} {'ATE RMSE↓':>12} "
-            f"{'Train PSNR/SSIM':>21} {'Test PSNR/SSIM':>21} "
-            f"{'FPS':>9} {'Gaussians':>12}"
+            f"{'Method':<26} {'MaxMap':>9} {'ATE↓':>11} "
+            f"{'Train P/S/L':>24} {'Test P/S/L':>24} "
+            f"{'FPS':>8} {'Time(s)':>11} {'Gaussians':>12}"
         )
-        print("-" * 116)
+        print("-" * 134)
         print(
             f"{a['label']:<26} "
             f"{100*a['maxmap_ratio']:>8.2f}% "
-            f"{a['ate_rmse_se3_m']:>10.4f} m "
-            f"{a['train_psnr']:>8.2f}/{a['train_ssim']:<10.4f} "
-            f"{a['test_psnr']:>8.2f}/{a['test_ssim']:<10.4f} "
-            f"{a['fps']:>9.4f} {fmt_g(a['gaussians']):>12}"
+            f"{a['ate_rmse_se3_m']:>8.4f}m "
+            f"{a['train_psnr']:>6.2f}/{a['train_ssim']:.4f}/{a['train_lpips']:.4f} "
+            f"{a['test_psnr']:>6.2f}/{a['test_ssim']:.4f}/{a['test_lpips']:.4f} "
+            f"{a['fps']:>8.4f} {a['time_seconds']:>11.1f} {fmt_gk(a['gaussians']):>12}"
         )
         print(
             f"{b['label']:<26} "
             f"{100*b['maxmap_ratio']:>8.2f}% "
-            f"{b['ate_rmse_se3_m']:>10.4f} m "
-            f"{b['train_psnr']:>8.2f}/{b['train_ssim']:<10.4f} "
-            f"{b['test_psnr']:>8.2f}/{b['test_ssim']:<10.4f} "
-            f"{'—':>9} {fmt_g(b['gaussians']):>12}"
+            f"{b['ate_rmse_se3_m']:>8.4f}m "
+            f"{b['train_psnr']:>6.2f}/{b['train_ssim']:.4f}/{b['train_lpips']:.4f} "
+            f"{b['test_psnr']:>6.2f}/{b['test_ssim']:.4f}/{b['test_lpips']:.4f} "
+            f"{'—':>8} {b['time_seconds']:>11.1f} {fmt_gk(b['gaussians']):>12}"
+        )
+
+        t = x["timing"]
+        print(
+            f"  Time scope: online={t['online_seconds']:.1f}s; "
+            f"offline={t['offline_seconds']:.1f}s "
+            f"[loop={t['loop_closure_seconds']:.1f}, PGO={t['pgo_seconds']:.1f}, "
+            f"deform={t['gaussian_deformation_seconds']:.1f}, SR={t['structure_refinement_seconds']:.1f}]; "
+            f"end-to-end={t['end_to_end_algorithm_seconds']:.1f}s"
         )
 
     print()
-    print("Metric protocol: full RGB, no silhouette/depth mask, single-scale SSIM.")
-    print("FPS protocol: unique sequence frames / summed Stage-1 online time; boundary-overlap work is charged in time.")
-    print("PGO/SR is staged final processing, so FPS is intentionally not reported for the +PGO/SR row.")
+    print("Metric protocol: full RGB; PSNR + single-scale SSIM + LPIPS(AlexNet); no silhouette/depth mask.")
+    print("Time(s): w/o PGO/SR row = online time; +PGO/SR row = offline backend time.")
+    print("FPS: unique sequence frames / online time. +PGO/SR FPS is intentionally not reported.")
+    print("End-to-end algorithm time (online + offline) is saved in each benchmark_summary_unified.json.")
 
 
 if __name__ == "__main__":
