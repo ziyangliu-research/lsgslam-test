@@ -1,28 +1,22 @@
 #!/usr/bin/env python3
 """Unified evaluator for the official-style TartanAir LSG-SLAM pipeline.
 
-Protocol used for the paper table:
-  * global test frames are 4, 9, 14, ... (pose-only during mapping/SR);
-  * PSNR and SSIM are computed on the full RGB image, with NO silhouette mask
-    and NO depth mask;
-  * SSIM is ordinary single-scale SSIM (utils.slam_external.calc_ssim);
-  * every global frame is evaluated exactly once.  At the one-frame boundary
-    overlap between official 200-frame submaps, the earlier submap owns the
-    boundary frame, matching the released backend's stitched trajectory;
-  * pre-PGO ATE is a true camera-center RMSE after rigid SE(3) alignment,
-    without scale alignment;
-  * post-PGO ATE is read from the already-completed full backend summary;
-  * FPS for LSG-SLAM (w/o PGO/SR) is unique_sequence_frames divided by the sum
-    of Stage-1 submap online_seconds.  Thus repeated boundary-frame work is
-    charged in the denominator while the numerator remains the real input
-    sequence length.  Preprocessing, model/dataset setup, and final evaluation
-    are excluded by the per-submap timer.  PGO/SR FPS is intentionally N/A.
-
-This script does not rerun SLAM, PGO, Gaussian deformation, or SR.  It uses the
-raw (unmasked) RGB renders already saved by the full backend.
+Paper protocol:
+  * test frames are global indices 4,9,14,...;
+  * full RGB metrics: no silhouette mask and no depth mask;
+  * PSNR, single-scale SSIM, and LPIPS(AlexNet) are reported;
+  * each global frame is counted once across one-frame submap overlaps;
+  * ATE is camera-center true RMSE after rigid SE(3) alignment, no scale;
+  * online FPS = unique sequence frames / summed Stage-1 online time;
+  * online Time(s) is Stage-1 online time;
+  * offline Time(s) is loop-closure/constraint-generation wall time plus
+    backend PGO + Gaussian-deformation + SR optimization time, excluding final
+    benchmark metric rendering;
+  * end-to-end algorithm time = online + offline and is saved in JSON.
 """
 
 import argparse
+import csv
 import glob
 import json
 import math
@@ -33,6 +27,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from utils.slam_external import calc_ssim
 from diagnose_tartanair_full_pose import (
@@ -43,6 +38,7 @@ from diagnose_tartanair_full_pose import (
 
 
 _RENDER_RE = re.compile(r"^(\d+)_(\d+)_rgb\.png$")
+DEFAULT_SEQS = ["SE000", "SE001", "SE002", "SE003", "SH000", "SH001", "SH002", "SH003"]
 
 
 def _parse_submap_dir(path, seq):
@@ -104,7 +100,7 @@ def _read_rgb(path):
     return im.astype(np.float32) / 255.0
 
 
-def _metric_pair(render_path, gt_path):
+def _metric_pair(render_path, gt_path, lpips_model, device):
     pred = _read_rgb(render_path)
     gt = _read_rgb(gt_path)
     if pred.shape != gt.shape:
@@ -113,16 +109,17 @@ def _metric_pair(render_path, gt_path):
             f"GT={gt.shape} ({gt_path})"
         )
 
-    pred_t = torch.from_numpy(pred).permute(2, 0, 1).unsqueeze(0)
-    gt_t = torch.from_numpy(gt).permute(2, 0, 1).unsqueeze(0)
+    pred_t = torch.from_numpy(pred).permute(2, 0, 1).unsqueeze(0).to(device)
+    gt_t = torch.from_numpy(gt).permute(2, 0, 1).unsqueeze(0).to(device)
+    with torch.no_grad():
+        mse = torch.mean((pred_t - gt_t) ** 2).item()
+        psnr = float("inf") if mse <= 0.0 else float(-10.0 * math.log10(mse))
+        ssim = float(calc_ssim(pred_t, gt_t, size_average=True).item())
+        lpips = float(lpips_model(pred_t, gt_t).item())
+    return psnr, ssim, lpips
 
-    mse = torch.mean((pred_t - gt_t) ** 2).item()
-    psnr = float("inf") if mse <= 0.0 else float(-10.0 * math.log10(mse))
-    ssim = float(calc_ssim(pred_t, gt_t, size_average=True).item())
-    return psnr, ssim
 
-
-def _evaluate_render_set(render_dir, gt_dir, expected_frames):
+def _evaluate_render_set(render_dir, gt_dir, expected_frames, lpips_model, device):
     renders, duplicates = _collect_unique_renders(render_dir)
     expected = set(range(expected_frames))
     available = set(renders.keys())
@@ -130,37 +127,38 @@ def _evaluate_render_set(render_dir, gt_dir, expected_frames):
     extra = sorted(available - expected)
     if missing:
         raise RuntimeError(
-            f"Missing {len(missing)} global render frames in {render_dir}; "
-            f"first missing={missing[:10]}"
+            f"Missing {len(missing)} global render frames in {render_dir}; first missing={missing[:10]}"
         )
     if extra:
-        raise RuntimeError(
-            f"Unexpected global render frames in {render_dir}: {extra[:10]}"
-        )
+        raise RuntimeError(f"Unexpected global render frames in {render_dir}: {extra[:10]}")
 
-    train_psnr, train_ssim = [], []
-    test_psnr, test_ssim = [], []
+    train_psnr, train_ssim, train_lpips = [], [], []
+    test_psnr, test_ssim, test_lpips = [], [], []
     per_frame = []
 
     for idx in range(expected_frames):
         gt_path = os.path.join(gt_dir, f"{idx:06d}_left.png")
         if not os.path.isfile(gt_path):
             raise FileNotFoundError(gt_path)
-        psnr, ssim = _metric_pair(renders[idx], gt_path)
+        psnr, ssim, lpips = _metric_pair(renders[idx], gt_path, lpips_model, device)
         is_test = (idx % 5) == 4
         if is_test:
             test_psnr.append(psnr)
             test_ssim.append(ssim)
+            test_lpips.append(lpips)
         else:
             train_psnr.append(psnr)
             train_ssim.append(ssim)
-        per_frame.append((idx, psnr, ssim, "test" if is_test else "train"))
+            train_lpips.append(lpips)
+        per_frame.append((idx, psnr, ssim, lpips, "test" if is_test else "train"))
 
     return {
         "train_psnr": float(np.mean(train_psnr)),
         "train_ssim": float(np.mean(train_ssim)),
+        "train_lpips": float(np.mean(train_lpips)),
         "test_psnr": float(np.mean(test_psnr)),
         "test_ssim": float(np.mean(test_ssim)),
+        "test_lpips": float(np.mean(test_lpips)),
         "train_frames": len(train_psnr),
         "test_frames": len(test_psnr),
         "duplicate_boundary_renders_skipped": len(duplicates),
@@ -180,7 +178,7 @@ def _aggregate_stage1(seq_root, seq):
         if not os.path.isfile(summary_path):
             raise FileNotFoundError(
                 f"Missing per-submap timing summary: {summary_path}. "
-                "Stage-1 must have been run with scripts/tartanair_split_splatam.py."
+                "Stage-1 must use scripts/tartanair_split_splatam.py."
             )
         with open(summary_path, "r", encoding="utf-8") as f:
             x = json.load(f)
@@ -215,18 +213,53 @@ def _pre_pgo_ate(seq_root, seq):
     return float(ate), int(valid.sum()), int(len(valid))
 
 
+def _load_offline_timing(seq_root):
+    loop_path = os.path.join(seq_root, "loop_stage_timing.json")
+    backend_path = os.path.join(seq_root, "backend_optimization_timing.json")
+    if not os.path.isfile(loop_path):
+        raise FileNotFoundError(
+            f"Missing offline loop timing: {loop_path}. Run the final 8-sequence runner."
+        )
+    if not os.path.isfile(backend_path):
+        raise FileNotFoundError(
+            f"Missing backend optimization timing: {backend_path}. Run the final 8-sequence runner."
+        )
+    with open(loop_path, "r", encoding="utf-8") as f:
+        loop = json.load(f)
+    with open(backend_path, "r", encoding="utf-8") as f:
+        backend = json.load(f)
+
+    loop_seconds = float(loop["wall_seconds"])
+    backend_seconds = float(backend["backend_optimization_seconds"])
+    offline_seconds = loop_seconds + backend_seconds
+    return {
+        "loop_closure_seconds": loop_seconds,
+        "pgo_seconds": float(backend["pgo_seconds"]),
+        "gaussian_deformation_seconds": float(backend["gaussian_deformation_seconds"]),
+        "structure_refinement_seconds": float(backend["structure_refinement_seconds"]),
+        "backend_optimization_seconds": backend_seconds,
+        "offline_seconds": offline_seconds,
+    }
+
+
 def _save_per_frame_csv(path, before_rows, after_rows):
-    before = {i: (p, s, role) for i, p, s, role in before_rows}
-    after = {i: (p, s, role) for i, p, s, role in after_rows}
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("frame,split,wopgo_psnr,wopgo_ssim,full_psnr,full_ssim\n")
+    before = {i: (p, s, l, role) for i, p, s, l, role in before_rows}
+    after = {i: (p, s, l, role) for i, p, s, l, role in after_rows}
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "frame", "split",
+            "wopgo_psnr", "wopgo_ssim", "wopgo_lpips",
+            "full_psnr", "full_ssim", "full_lpips",
+        ])
         for idx in sorted(before):
-            bp, bs, role = before[idx]
-            ap, ass, _ = after[idx]
-            f.write(f"{idx},{role},{bp:.10f},{bs:.10f},{ap:.10f},{ass:.10f}\n")
+            bp, bs, bl, role = before[idx]
+            ap, ass, al, _ = after[idx]
+            w.writerow([idx, role, f"{bp:.10f}", f"{bs:.10f}", f"{bl:.10f}",
+                        f"{ap:.10f}", f"{ass:.10f}", f"{al:.10f}"])
 
 
-def evaluate_sequence(root, data_root, seq):
+def evaluate_sequence(root, data_root, seq, lpips_model, device):
     seq_root = os.path.join(root, seq)
     render_root = os.path.join(seq_root, "RenderingResult")
     before_dir = os.path.join(render_root, "before_opt_render_rgb")
@@ -235,16 +268,20 @@ def evaluate_sequence(root, data_root, seq):
 
     stage1 = _aggregate_stage1(seq_root, seq)
     num_frames = int(stage1["unique_sequence_frames"])
-    before = _evaluate_render_set(before_dir, gt_dir, num_frames)
-    after = _evaluate_render_set(after_dir, gt_dir, num_frames)
-
+    before = _evaluate_render_set(before_dir, gt_dir, num_frames, lpips_model, device)
+    after = _evaluate_render_set(after_dir, gt_dir, num_frames, lpips_model, device)
     pre_ate, pre_tracked, pre_total = _pre_pgo_ate(seq_root, seq)
+    offline = _load_offline_timing(seq_root)
 
     full_summary_path = os.path.join(seq_root, "benchmark_summary_full_split.json")
     if not os.path.isfile(full_summary_path):
         raise FileNotFoundError(full_summary_path)
     with open(full_summary_path, "r", encoding="utf-8") as f:
         full = json.load(f)
+
+    online_seconds = float(stage1["online_seconds_sum"])
+    offline_seconds = float(offline["offline_seconds"])
+    total_seconds = online_seconds + offline_seconds
 
     summary = {
         "sequence": seq,
@@ -253,9 +290,11 @@ def evaluate_sequence(root, data_root, seq):
             "rgb_metric": "full RGB image; no silhouette mask; no depth mask; saved raw 8-bit renders",
             "psnr": "-10*log10(mean RGB squared error), data range 1",
             "ssim": "single-scale SSIM, 11x11 Gaussian window, utils.slam_external.calc_ssim",
+            "lpips": "LPIPS AlexNet via torchmetrics, normalize=True, full RGB image",
             "duplicate_submap_boundary_rule": "each global frame counted once; earlier submap owns duplicated boundary frame",
             "ate": "camera-center true RMSE after rigid SE(3) alignment; no scale alignment",
-            "fps": "unique sequence frames / sum(Stage-1 submap online_seconds); overlap work remains in denominator; preprocessing/setup/final eval excluded",
+            "fps": "unique sequence frames / sum(Stage-1 submap online_seconds); overlap work remains in denominator",
+            "time": "w/o row reports online seconds; +PGO/SR row reports offline seconds; JSON also stores online+offline end-to-end seconds",
         },
         "without_pgo_sr": {
             "label": "LSG-SLAM (w/o PGO/SR)",
@@ -265,10 +304,13 @@ def evaluate_sequence(root, data_root, seq):
             "ate_rmse_se3_m": pre_ate,
             "train_psnr": before["train_psnr"],
             "train_ssim": before["train_ssim"],
+            "train_lpips": before["train_lpips"],
             "test_psnr": before["test_psnr"],
             "test_ssim": before["test_ssim"],
+            "test_lpips": before["test_lpips"],
             "fps": float(stage1["fps"]),
-            "online_seconds": float(stage1["online_seconds_sum"]),
+            "time_seconds": online_seconds,
+            "online_seconds": online_seconds,
             "gaussians": int(stage1["gaussians"]),
         },
         "with_pgo_sr": {
@@ -279,10 +321,20 @@ def evaluate_sequence(root, data_root, seq):
             "ate_rmse_se3_m": float(full["ate_rmse_se3_m"]),
             "train_psnr": after["train_psnr"],
             "train_ssim": after["train_ssim"],
+            "train_lpips": after["train_lpips"],
             "test_psnr": after["test_psnr"],
             "test_ssim": after["test_ssim"],
+            "test_lpips": after["test_lpips"],
             "fps": None,
+            "time_seconds": offline_seconds,
+            "offline_seconds": offline_seconds,
+            "total_pipeline_seconds": total_seconds,
             "gaussians": int(full["gaussians"]),
+        },
+        "timing": {
+            "online_seconds": online_seconds,
+            **offline,
+            "end_to_end_algorithm_seconds": total_seconds,
         },
         "stage1_timing": stage1,
         "render_accounting": {
@@ -299,19 +351,13 @@ def evaluate_sequence(root, data_root, seq):
 
     _save_per_frame_csv(
         os.path.join(seq_root, "benchmark_metrics_unified_per_frame.csv"),
-        before["per_frame"],
-        after["per_frame"],
+        before["per_frame"], after["per_frame"],
     )
     return summary
 
 
-def _fmt_g(n):
-    n = int(n)
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.2f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}k"
-    return str(n)
+def _fmt_gk(n):
+    return f"{int(n) / 1000.0:.1f}k"
 
 
 def _print_summary(x):
@@ -321,34 +367,35 @@ def _print_summary(x):
     print()
     print(seq)
     print(
-        f"{'Method':<26} {'MaxMap':>9} {'ATE RMSE↓':>12} "
-        f"{'Train PSNR/SSIM':>21} {'Test PSNR/SSIM':>21} {'FPS':>9} {'Gaussians':>12}"
+        f"{'Method':<26} {'MaxMap':>9} {'ATE↓':>11} "
+        f"{'Train P/S/L':>24} {'Test P/S/L':>24} {'FPS':>8} {'Time(s)':>11} {'G':>11}"
     )
-    print("-" * 116)
+    print("-" * 132)
     print(
-        f"{a['label']:<26} {100*a['maxmap_ratio']:>8.2f}% {a['ate_rmse_se3_m']:>10.4f} m "
-        f"{a['train_psnr']:>8.2f}/{a['train_ssim']:<10.4f} "
-        f"{a['test_psnr']:>8.2f}/{a['test_ssim']:<10.4f} "
-        f"{a['fps']:>9.4f} {_fmt_g(a['gaussians']):>12}"
+        f"{a['label']:<26} {100*a['maxmap_ratio']:>8.2f}% {a['ate_rmse_se3_m']:>8.4f}m "
+        f"{a['train_psnr']:>6.2f}/{a['train_ssim']:.4f}/{a['train_lpips']:.4f} "
+        f"{a['test_psnr']:>6.2f}/{a['test_ssim']:.4f}/{a['test_lpips']:.4f} "
+        f"{a['fps']:>8.4f} {a['time_seconds']:>11.1f} {_fmt_gk(a['gaussians']):>11}"
     )
     print(
-        f"{b['label']:<26} {100*b['maxmap_ratio']:>8.2f}% {b['ate_rmse_se3_m']:>10.4f} m "
-        f"{b['train_psnr']:>8.2f}/{b['train_ssim']:<10.4f} "
-        f"{b['test_psnr']:>8.2f}/{b['test_ssim']:<10.4f} "
-        f"{'—':>9} {_fmt_g(b['gaussians']):>12}"
+        f"{b['label']:<26} {100*b['maxmap_ratio']:>8.2f}% {b['ate_rmse_se3_m']:>8.4f}m "
+        f"{b['train_psnr']:>6.2f}/{b['train_ssim']:.4f}/{b['train_lpips']:.4f} "
+        f"{b['test_psnr']:>6.2f}/{b['test_ssim']:.4f}/{b['test_lpips']:.4f} "
+        f"{'—':>8} {b['time_seconds']:>11.1f} {_fmt_gk(b['gaussians']):>11}"
     )
-    t = x["stage1_timing"]
+    t = x["timing"]
     print(
-        f"FPS scope: {t['unique_sequence_frames']} unique frames / "
-        f"{t['online_seconds_sum']:.3f}s Stage-1 online time "
-        f"({t['processed_stage1_frames_including_overlap']} processed incl. overlaps)"
+        f"Timing: online={t['online_seconds']:.1f}s, offline={t['offline_seconds']:.1f}s "
+        f"(loop={t['loop_closure_seconds']:.1f}s, PGO={t['pgo_seconds']:.1f}s, "
+        f"deform={t['gaussian_deformation_seconds']:.1f}s, SR={t['structure_refinement_seconds']:.1f}s), "
+        f"end-to-end={t['end_to_end_algorithm_seconds']:.1f}s"
     )
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("sequences", nargs="*", default=["SH000", "SH001", "SH002", "SH003"])
-    ap.add_argument("--root", default="experiments/tartanair_official_full_split")
+    ap.add_argument("sequences", nargs="*", default=DEFAULT_SEQS)
+    ap.add_argument("--root", default="experiments/tartanair_official_full_final8")
     ap.add_argument(
         "--data-root",
         default=os.environ.get(
@@ -358,13 +405,20 @@ def main():
     )
     args = ap.parse_args()
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Metric device: {device}")
+    print("Initializing LPIPS(AlexNet)...")
+    lpips_model = LearnedPerceptualImagePatchSimilarity(
+        net_type="alex", normalize=True
+    ).to(device).eval()
+
     for seq in args.sequences:
-        x = evaluate_sequence(args.root, args.data_root, seq)
+        x = evaluate_sequence(args.root, args.data_root, seq, lpips_model, device)
         _print_summary(x)
 
     print()
     print("Unified metrics written to <seq>/benchmark_summary_unified.json")
-    print("Per-frame metrics written to <seq>/benchmark_metrics_unified_per_frame.csv")
+    print("Per-frame PSNR/SSIM/LPIPS written to <seq>/benchmark_metrics_unified_per_frame.csv")
 
 
 if __name__ == "__main__":
