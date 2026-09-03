@@ -1,4 +1,11 @@
-"""TartanAir entry point for the unmodified LSG-SLAM loop-closure stage."""
+"""TartanAir entry point for the released LSG-SLAM loop-closure stage.
+
+For benchmark timing, the read-only final eval() at the end of each temporary
+loop-pair rgbd_slam run is skipped. It does not affect tracking, mapping, loop
+constraint estimation, inlier files, or saved parameters; it only renders
+additional diagnostic metrics/figures. This keeps offline algorithm time free
+of benchmark-evaluation overhead.
+"""
 
 import argparse
 import os
@@ -25,12 +32,18 @@ def _get_dataset(config_dict, basedir, sequence, **kwargs):
     return _original_get_dataset(config_dict, basedir, sequence, **kwargs)
 
 
+def _skip_loop_pair_final_eval(*_args, **_kwargs):
+    print("[Benchmark timing] Skip temporary loop-pair final metric eval.")
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("experiment", type=str, help="Path to TartanAir experiment file")
     args = parser.parse_args()
 
     lsg_loop.get_dataset = _get_dataset
+    lsg_loop.eval = _skip_loop_pair_final_eval
 
     experiment = SourceFileLoader(
         os.path.basename(args.experiment), args.experiment
