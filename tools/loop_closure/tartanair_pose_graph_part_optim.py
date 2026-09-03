@@ -2,10 +2,13 @@
 
 The released tools/loop_closure/pose_graph_part_optim.py stays unchanged on disk.
 This wrapper applies only TartanAir routing and the experiment protocol at
-runtime.  For the 8:2 benchmark, test frames (global ids 4,9,14,...) may take
+runtime. For the 8:2 benchmark, test frames (global ids 4,9,14,...) may take
 part in pose estimation / loop closure, but they are excluded from the 5000-
-iteration structure-refinement loss.  Final rendering is evaluated on every
+iteration structure-refinement loss. Final rendering is evaluated on every
 frame and reported separately for train/test.
+
+The wrapper also records optimization-only backend timing (PGO, Gaussian
+deformation, and SR), explicitly excluding before/after metric rendering.
 """
 
 import os
@@ -35,8 +38,8 @@ def main():
     source = _replace_once(
         source,
         "import numpy as np\n",
-        "import numpy as np\nimport json\n",
-        "json import",
+        "import numpy as np\nimport json\nimport time\n",
+        "json/time import",
     )
 
     source = _replace_once(
@@ -177,8 +180,22 @@ def main():
     after_train_psnr, after_train_ssim = [], []
     after_test_psnr, after_test_ssim = [], []
     total_gaussians = 0
+    pgo_opt_seconds = 0.0
+    gaussian_deformation_seconds = 0.0
+    sr_opt_seconds = 0.0
 ''',
-        "split metric accumulators",
+        "split metric and timing accumulators",
+    )
+
+    source = _replace_once(
+        source,
+        '''            PGM.optimizePoseGraph()
+''',
+        '''            _pgo_t0 = time.perf_counter()
+            PGM.optimizePoseGraph()
+            pgo_opt_seconds += time.perf_counter() - _pgo_t0
+''',
+        "PGO timing",
     )
 
     source = _replace_once(
@@ -204,6 +221,36 @@ def main():
 
     source = _replace_once(
         source,
+        '''        # deformation
+        pre_est_w2cs = torch.tensor(np.array(before_opt_w2cs), dtype=torch.float32, device='cuda') # (k, 4, 4)
+''',
+        '''        # deformation
+        torch.cuda.synchronize()
+        _deform_t0 = time.perf_counter()
+        pre_est_w2cs = torch.tensor(np.array(before_opt_w2cs), dtype=torch.float32, device='cuda') # (k, 4, 4)
+''',
+        "deformation timing start",
+    )
+
+    source = _replace_once(
+        source,
+        '''        params['means3D'] = torch.nn.Parameter(gs_new_means3d[:, :3].cuda().float().contiguous().requires_grad_(True))
+
+
+        # save the pc when need to debug
+''',
+        '''        params['means3D'] = torch.nn.Parameter(gs_new_means3d[:, :3].cuda().float().contiguous().requires_grad_(True))
+        torch.cuda.synchronize()
+        gaussian_deformation_seconds += time.perf_counter() - _deform_t0
+
+
+        # save the pc when need to debug
+''',
+        "deformation timing end",
+    )
+
+    source = _replace_once(
+        source,
         '''        for i in tqdm(range(structure_refine_total_iters), 'Color refining...'):
 
             index = random.randint(0, optim_c2ws.shape[0]-1)
@@ -215,11 +262,29 @@ def main():
         if len(train_local_indices) == 0:
             raise RuntimeError(f"No training frames available for SR part {start_idx}..{end_idx}")
         print(f"[Split-SR] train={len(train_local_indices)}/{optim_c2ws.shape[0]} frames")
+        torch.cuda.synchronize()
+        _sr_t0 = time.perf_counter()
         for i in tqdm(range(structure_refine_total_iters), 'Color refining...'):
 
             index = random.choice(train_local_indices)
 ''',
-        "train-only structure refinement",
+        "train-only structure refinement and timing start",
+    )
+
+    source = _replace_once(
+        source,
+        '''            # TODO  lr update
+
+        # eval structure refine
+''',
+        '''            # TODO  lr update
+
+        torch.cuda.synchronize()
+        sr_opt_seconds += time.perf_counter() - _sr_t0
+
+        # eval structure refine
+''',
+        "SR timing end",
     )
 
     source = _replace_once(
@@ -305,6 +370,18 @@ def main():
     split_summary_path = os.path.join(base_folder, 'benchmark_summary_full_split.json')
     with open(split_summary_path, 'w', encoding='utf-8') as split_file:
         json.dump(split_summary, split_file, indent=2)
+
+    backend_timing = {
+        'pgo_seconds': float(pgo_opt_seconds),
+        'gaussian_deformation_seconds': float(gaussian_deformation_seconds),
+        'structure_refinement_seconds': float(sr_opt_seconds),
+        'backend_optimization_seconds': float(pgo_opt_seconds + gaussian_deformation_seconds + sr_opt_seconds),
+        'scope': 'PGO optimizer calls + Gaussian deformation + 5000-iter SR; before/after metric rendering excluded',
+    }
+    backend_timing_path = os.path.join(base_folder, 'backend_optimization_timing.json')
+    with open(backend_timing_path, 'w', encoding='utf-8') as timing_file:
+        json.dump(backend_timing, timing_file, indent=2)
+
     print()
     print('================ Full LSG-SLAM 8:2 Summary ================')
     print(f"Sequence:             {scene_name}")
@@ -313,13 +390,15 @@ def main():
     print(f"Train PSNR/SSIM:      {split_summary['after_sr_train_psnr']:.4f} / {split_summary['after_sr_train_ssim']:.6f}")
     print(f"Test PSNR/SSIM:       {split_summary['after_sr_test_psnr']:.4f} / {split_summary['after_sr_test_ssim']:.6f}")
     print(f"Gaussians:            {total_gaussians}")
+    print(f"Backend opt time:     {backend_timing['backend_optimization_seconds']:.3f} s")
     print(f"Summary:              {split_summary_path}")
+    print(f"Timing:               {backend_timing_path}")
     print('===========================================================')
     print()
 
     with open(os.path.join(rendering_save_dir, 'avg_metrics.txt'), 'w', encoding='utf-8') as file:
 ''',
-        "full split summary",
+        "full split summary and backend timing",
     )
 
     module = types.ModuleType("lsg_tartanair_pose_graph_part_optim")
