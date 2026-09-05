@@ -17,13 +17,19 @@ def main():
     parser.add_argument("--root", default="experiments/tartanair_official_full_final8")
     args = parser.parse_args()
 
+    completed = []
+    missing = []
+
     for seq in args.sequences:
         p = os.path.join(args.root, seq, "benchmark_summary_unified.json")
         if not os.path.isfile(p):
-            raise FileNotFoundError(
-                f"Unified summary not found: {p}\n"
-                "Run tools/evaluate_tartanair_full_unified.py first."
-            )
+            missing.append(seq)
+            print()
+            print(seq)
+            print("MISSING")
+            continue
+
+        completed.append(seq)
         with open(p, "r", encoding="utf-8") as f:
             x = json.load(f)
 
@@ -65,6 +71,10 @@ def main():
         )
 
     print()
+    print("============================== SUMMARY ==============================")
+    print(f"Completed: {len(completed)}/{len(args.sequences)}" + (f"  ({', '.join(completed)})" if completed else ""))
+    print(f"Missing:   {len(missing)}/{len(args.sequences)}" + (f"  ({', '.join(missing)})" if missing else ""))
+    print("=====================================================================")
     print("Metric protocol: full RGB; PSNR + single-scale SSIM + LPIPS(AlexNet); no silhouette/depth mask.")
     print("Time(s): w/o PGO/SR row = online time; +PGO/SR row = offline backend time.")
     print("FPS: unique sequence frames / online time. +PGO/SR FPS is intentionally not reported.")
