@@ -88,21 +88,29 @@ def _selected_indices(submaps):
     return ordered, duplicates
 
 
-def _collect_unique_renders(render_dir, stride=5):
+def _collect_unique_renders(render_dir):
+    """Decode released backend render filenames to synchronized-frame indices.
+
+    The released backend saves EuRoC RGB as
+    ``{start_idx:04d}_{i*stride:04d}_rgb.png``.  The second field is already a
+    raw/synchronized-frame offset.  Therefore dataset_idx = start + offset;
+    multiplying that offset by stride again would incorrectly discard 4/5 of
+    the valid renders during unified evaluation.
+    """
     candidates = []
     for p in glob.glob(os.path.join(render_dir, "*_rgb.png")):
         m = _RENDER_RE.match(os.path.basename(p))
         if not m:
             continue
         start = int(m.group(1))
-        local = int(m.group(2))
-        dataset_idx = start + local * stride
-        candidates.append((start, local, dataset_idx, p))
+        saved_offset = int(m.group(2))
+        dataset_idx = start + saved_offset
+        candidates.append((start, saved_offset, dataset_idx, p))
     candidates.sort(key=lambda x: (x[0], x[1]))
 
     unique = {}
     duplicates = []
-    for _start, _local, idx, p in candidates:
+    for _start, _offset, idx, p in candidates:
         if idx in unique:
             duplicates.append((idx, unique[idx], p))
             continue
@@ -157,7 +165,7 @@ def _metric_pair(render_path, gt_path, lpips_model, device):
 
 
 def _evaluate_render_set(render_dir, synced_gt, selected, lpips_model, device):
-    renders, duplicate_renders = _collect_unique_renders(render_dir, stride=5)
+    renders, duplicate_renders = _collect_unique_renders(render_dir)
     expected = set(selected)
     available = set(renders)
     missing = sorted(expected - available)
