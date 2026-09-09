@@ -23,7 +23,7 @@ class EurocDataset(GradSLAMDataset):
         desired_width: Optional[int] = 752,
         load_embeddings: Optional[bool] = False,
         embedding_dir: Optional[str] = "embeddings",
-        embedding_dim: Optional[int] = 512,
+        embedding_dim: int = 512,
         **kwargs,
     ):
         self.input_folder = os.path.join(basedir)
@@ -81,7 +81,11 @@ class EurocDataset(GradSLAMDataset):
         keep_depth_paths = []
         keep_feature_paths = []
         for iidx, image_path in enumerate(self.color_paths):
-            timestamp = os.path.basename(image_path).split('.')[0]
+            # Preserve the complete filename stem.  The released EuRoC files use
+            # integer nanosecond names, while ETH3D uses decimal-second names such
+            # as 5394.451474.png.  split('.')[0] truncates those to '5394' and
+            # incorrectly drops every ETH3D frame during timestamp synchronization.
+            timestamp = Path(image_path).stem
             if timestamp not in timestamps_dict:
                 # print(image_path)
                 num_no_gt_poses += 1
