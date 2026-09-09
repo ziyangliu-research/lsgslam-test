@@ -2,12 +2,12 @@ import json
 import os
 
 # ETH3D benchmark configuration.
-# The four selected rectified stereo sequences have no released LSG-SLAM
-# dataset-specific hyperparameter file, so we keep the released EuRoC frontend
-# hyperparameters and only substitute the per-sequence rectified calibration.
-# Protocol: full rectified stream, stride=1, strict 8:2 holdout (4,9,14,...).
+# Keep the same LSG-SLAM algorithm hyperparameters used by our TartanAir
+# benchmark. Only dataset-dependent camera calibration/resolution and paths are
+# substituted from the rectified ETH3D sequence. Protocol: full rectified
+# stream, stride=1, strict 8:2 holdout (4,9,14,...).
 
-primary_device = "cuda:0"
+primary_device = os.environ.get("LSG_DEVICE", "cuda:0")
 seed = 0
 
 scene_name = os.environ.get("ETH3D_SEQUENCE", "mannequin_face_1")
@@ -36,7 +36,7 @@ eval_split_every = 5
 eval_split_offset = 4
 
 run_name = f"{scene_name}_{start_idx}_{end_idx}_{stride}"
-group_name = "eth3d_full_split_final4"
+group_name = workdir
 
 config = dict(
     workdir=workdir,
@@ -75,9 +75,9 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        # ETH3D preprocessing creates an EuRoC-compatible view of the rectified
-        # left camera: data_rect -> image_left, traj.txt, depth_sceneflow,
-        # global_features, and a dynamic camera YAML generated from calibration.json.
+        # Dataset-specific fields only: the rectified ETH3D left camera,
+        # precomputed stereo depth/global features, aligned GT trajectory, and
+        # camera YAML generated from calibration.json.
         basedir=seq_dir,
         gradslam_data_cfg=os.path.join(seq_dir, "eth3d_lsg.yaml"),
         sequence=scene_name,
@@ -154,12 +154,12 @@ config = dict(
         offset_first_viz_cam=True,
         show_sil=False,
         visualize_cams=True,
-        viz_w=2560,
-        viz_h=1600,
+        viz_w=1280,
+        viz_h=960,
         viz_near=0.01,
         viz_far=100.0,
         view_scale=2,
         viz_fps=5,
-        enter_interactive_post_online=True,
+        enter_interactive_post_online=False,
     ),
 )
